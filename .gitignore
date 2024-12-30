@@ -1,0 +1,7 @@
+.DS_Store
+*.exe
+*.test
+.idea
+.vscode
+
+/ossctl
