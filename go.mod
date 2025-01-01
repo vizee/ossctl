@@ -1,4 +1,4 @@
-module tools/ossctl
+module github.com/vizee/ossctl
 
 go 1.23.0
 

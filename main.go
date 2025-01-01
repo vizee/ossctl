@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -204,11 +206,91 @@ func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *Download
 	return err
 }
 
+func getFileMD5(fname string, generatePreMD5 bool) ([]byte, error) {
+	preMD5File := filepath.Join(filepath.Dir(fname), "."+filepath.Base(fname)+".md5")
+	preMD5, err := os.ReadFile(preMD5File)
+	if err == nil {
+		return preMD5, nil
+	}
+
+	f, err := os.Open(fname)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	hasher := md5.New()
+
+	buf := make([]byte, 8*1024)
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			_, _ = hasher.Write(buf[:n])
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+	}
+
+	md5sum := hasher.Sum(nil)
+
+	if generatePreMD5 {
+		_ = os.WriteFile(preMD5File, md5sum, 0644)
+	}
+
+	return md5sum, nil
+}
+
+type FileComparer struct {
+	checkMD5 bool
+}
+
+func (c *FileComparer) compareFile(curFile string, diffFile string) (bool, error) {
+	curInfo, err := os.Stat(curFile)
+	if err != nil {
+		return false, err
+	}
+	var curMD5 []byte
+	if c.checkMD5 {
+		curMD5, err = getFileMD5(curFile, true)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	diffInfo, err := os.Stat(diffFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+		return false, nil
+	}
+
+	if curInfo.Size() != diffInfo.Size() {
+		return false, nil
+	}
+
+	if c.checkMD5 {
+		diffMD5, err := getFileMD5(diffFile, false)
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(curMD5, diffMD5) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 type UploadOptions struct {
 	Workers         int
 	ForbidOverwrite bool
 	IncludeHidden   bool
 	DryRun          bool
+	DiffDir         string
+	DiffMD5         bool
 }
 
 func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions, bucket string, key string, filePath string) error {
@@ -239,6 +321,13 @@ func uploadDir(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions,
 		root += "/"
 	}
 
+	var fc *FileComparer
+	if opts.DiffDir != "" {
+		fc = &FileComparer{
+			checkMD5: opts.DiffMD5,
+		}
+	}
+
 	var (
 		wg sync.WaitGroup
 	)
@@ -248,8 +337,14 @@ func uploadDir(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions,
 		go func() {
 			defer wg.Done()
 			for filePath := range ch {
-				relPath := filepath.ToSlash(strings.TrimPrefix(filePath, root))
-				err := uploadObject(ctx, uploader, opts, bucket, path.Join(key, relPath), filePath)
+				relPath := strings.TrimPrefix(filePath, root)
+				if fc != nil {
+					same, err := fc.compareFile(filePath, filepath.Join(opts.DiffDir, relPath))
+					if err == nil && same {
+						continue
+					}
+				}
+				err := uploadObject(ctx, uploader, opts, bucket, path.Join(key, filepath.ToSlash(relPath)), filePath)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "upload object: %v\n", err)
 					continue
@@ -583,6 +678,9 @@ func uploadCommand() *cobra.Command {
 		Workers:         0,
 		ForbidOverwrite: false,
 		IncludeHidden:   false,
+		DryRun:          false,
+		DiffDir:         "",
+		DiffMD5:         false,
 	}
 
 	cmd := &cobra.Command{
@@ -626,6 +724,8 @@ func uploadCommand() *cobra.Command {
 	cmd.Flags().BoolVarP(&opts.IncludeHidden, "hidden", "H", false, "include hidden files")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "dry run")
 	cmd.Flags().IntVar(&opts.Workers, "workers", 1, "workers for upload files")
+	cmd.Flags().StringVar(&opts.DiffDir, "diff-dir", "", "compare file changes before upload")
+	cmd.Flags().BoolVar(&opts.DiffMD5, "diff-md5", false, "compare file by MD5")
 
 	return cmd
 }
