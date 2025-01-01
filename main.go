@@ -3,7 +3,9 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -123,6 +125,18 @@ func downloadObject(ctx context.Context, downloader *oss.Downloader, opts *Downl
 	}
 
 	return nil
+}
+
+func catObject(ctx context.Context, w io.Writer, bucket string, key string) error {
+	res, err := ossClient.GetObject(ctx, &oss.GetObjectRequest{
+		Bucket: oss.Ptr(bucket),
+		Key:    oss.Ptr(key),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, res.Body)
+	return err
 }
 
 func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *DownloadOptions, bucket string, prefix string, outputRoot string) error {
@@ -399,6 +413,105 @@ func listCommand() *cobra.Command {
 	return cmd
 }
 
+func catCommand() *cobra.Command {
+	var (
+		output string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "cat bucket:key...",
+		Args:  cobra.MinimumNArgs(1),
+		Short: "print content to stdout",
+		Run: func(cmd *cobra.Command, args []string) {
+			var out io.Writer
+			if output == "-" {
+				out = os.Stdout
+			} else {
+				f, err := os.Create(output)
+				if err != nil {
+					fatalf("%v\n", err)
+				}
+				defer f.Close()
+				out = f
+			}
+
+			for _, arg := range args {
+				bucket, key, ok := splitBucketKey(arg)
+				if !ok {
+					fatalf("invalid bucket:prefix\n")
+				}
+				err := catObject(cmd.Context(), out, bucket, key)
+				if err != nil {
+					fatalf("read object: %v\n", err)
+				}
+			}
+		},
+	}
+
+	cmd.Flags().StringVarP(&output, "output", "o", "-", "output")
+
+	return cmd
+}
+
+type ObjectInfo struct {
+	ContentLength int64     `json:"contentLength"`
+	ContentType   string    `json:"contentType"`
+	Etag          string    `json:"etag"`
+	LastModified  time.Time `json:"lastModified"`
+	ContentMD5    string    `json:"contentMD5"`
+	HashCRC64     string    `json:"hashCRC64"`
+}
+
+func headCommand() *cobra.Command {
+	var (
+		jsonFormat bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "head bucket:key",
+		Args:  cobra.ExactArgs(1),
+		Short: "print head information",
+		Run: func(cmd *cobra.Command, args []string) {
+			bucket, key, ok := splitBucketKey(args[0])
+			if !ok {
+				fatalf("invalid bucket:prefix\n")
+			}
+
+			info, err := ossClient.HeadObject(cmd.Context(), &oss.HeadObjectRequest{
+				Bucket: oss.Ptr(bucket),
+				Key:    oss.Ptr(key),
+			})
+			if err != nil {
+				fatalf("read object information: %v\n", err)
+			}
+
+			oi := &ObjectInfo{
+				ContentLength: info.ContentLength,
+				ContentType:   oss.ToString(info.ContentType),
+				Etag:          oss.ToString(info.ETag),
+				LastModified:  oss.ToTime(info.LastModified),
+				ContentMD5:    oss.ToString(info.ContentMD5),
+				HashCRC64:     oss.ToString(info.HashCRC64),
+			}
+
+			if jsonFormat {
+				_ = json.NewEncoder(os.Stdout).Encode(oi)
+			} else {
+				fmt.Println("ContentLength:", oi.ContentLength)
+				fmt.Println("ContentType:", oi.ContentType)
+				fmt.Println("Etag:", oi.Etag)
+				fmt.Println("LastModified:", oi.LastModified.Format(time.RFC3339))
+				fmt.Println("ContentMD5:", oi.ContentMD5)
+				fmt.Println("HashCRC64:", oi.HashCRC64)
+			}
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonFormat, "json", false, "JSON format")
+
+	return cmd
+}
+
 func downloadCommand() *cobra.Command {
 	var (
 		outputPath  string
@@ -629,6 +742,8 @@ func main() {
 	app.PersistentFlags().BoolVarP(&verbose, "verbose", "V", false, "show verbose")
 
 	app.AddCommand(listCommand())
+	app.AddCommand(catCommand())
+	app.AddCommand(headCommand())
 	app.AddCommand(uploadCommand())
 	app.AddCommand(downloadCommand())
 	app.AddCommand(copyCommand())
