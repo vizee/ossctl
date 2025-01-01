@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,47 @@ func splitBucketKey(s string) (string, string, bool) {
 		return "", "", false
 	}
 	return bucket, strings.TrimLeft(key, "/"), true
+}
+
+type MatchRule struct {
+	re  *regexp.Regexp
+	yes bool
+}
+
+type Filter struct {
+	rules []*MatchRule
+	def   bool
+}
+
+func (f *Filter) isMatch(s string) bool {
+	for _, rule := range f.rules {
+		if rule.re.MatchString(s) {
+			return rule.yes
+		}
+	}
+	return false
+}
+
+func buildFilter(rules []string) (*Filter, error) {
+	mrs := make([]*MatchRule, 0, len(rules))
+	for _, rule := range rules {
+		yes := true
+		if strings.HasPrefix(rule, "!") {
+			rule = rule[1:]
+			yes = false
+		}
+		re, err := regexp.Compile(rule)
+		if err != nil {
+			return nil, err
+		}
+		mrs = append(mrs, &MatchRule{
+			re:  re,
+			yes: yes,
+		})
+	}
+	return &Filter{
+		rules: mrs,
+	}, nil
 }
 
 func listObjects(ctx context.Context, bucket string, prefix string, delimiter string, startAfter string, f func(*oss.ObjectProperties) error) error {
@@ -141,7 +183,7 @@ func catObject(ctx context.Context, w io.Writer, bucket string, key string) erro
 	return err
 }
 
-func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *DownloadOptions, bucket string, prefix string, outputRoot string) error {
+func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *DownloadOptions, bucket string, prefix string, outputRoot string, filter *Filter) error {
 	var delimiter string
 	if opts.Recursive {
 		delimiter = ""
@@ -166,7 +208,12 @@ func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *Download
 		go func() {
 			defer wg.Done()
 			for op := range ch {
-				relDir, fileName := path.Split(strings.TrimPrefix(oss.ToString(op.Key), prefix))
+				objectKey := oss.ToString(op.Key)
+				if filter.isMatch(objectKey) {
+					continue
+				}
+
+				relDir, fileName := path.Split(strings.TrimPrefix(objectKey, prefix))
 				var outDir string
 				if relDir != "" {
 					outDir = filepath.Join(outputRoot, filepath.FromSlash(relDir))
@@ -186,7 +233,7 @@ func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *Download
 					outDir = outputRoot
 				}
 				outputFile := filepath.Join(outDir, fileName)
-				err := downloadObject(ctx, downloader, opts, bucket, oss.ToString(op.Key), outputFile)
+				err := downloadObject(ctx, downloader, opts, bucket, objectKey, outputFile)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "download object: %v\n", err)
 					continue
@@ -316,7 +363,7 @@ func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptio
 	return nil
 }
 
-func uploadDir(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions, bucket string, key string, root string, recursive bool) error {
+func uploadDir(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions, bucket string, key string, root string, recursive bool, filter *Filter) error {
 	if !strings.HasSuffix(root, "/") {
 		root += "/"
 	}
@@ -337,6 +384,10 @@ func uploadDir(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions,
 		go func() {
 			defer wg.Done()
 			for filePath := range ch {
+				if filter.isMatch(filePath) {
+					continue
+				}
+
 				relPath := strings.TrimPrefix(filePath, root)
 				if fc != nil {
 					same, err := fc.compareFile(filePath, filepath.Join(opts.DiffDir, relPath))
@@ -416,7 +467,7 @@ func copyObject(ctx context.Context, copier *oss.Copier, opts *CopyOptions, srcB
 	return nil
 }
 
-func copyDir(ctx context.Context, copier *oss.Copier, opts *CopyOptions, srcBucket string, srcKey string, dstBucket string, dstKey string) error {
+func copyDir(ctx context.Context, copier *oss.Copier, opts *CopyOptions, srcBucket string, srcKey string, dstBucket string, dstKey string, filter *Filter) error {
 	var delimiter string
 	if opts.Recursive {
 		delimiter = ""
@@ -434,6 +485,10 @@ func copyDir(ctx context.Context, copier *oss.Copier, opts *CopyOptions, srcBuck
 			defer wg.Done()
 			for op := range ch {
 				srcKey := oss.ToString(op.Key)
+				if filter.isMatch(srcKey) {
+					continue
+				}
+
 				err := copyObject(ctx, copier, opts, srcBucket, srcKey, dstBucket, path.Join(dstKey, srcKey))
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "copy object: %v\n", err)
@@ -475,6 +530,7 @@ func listCommand() *cobra.Command {
 		delimiter   string
 		startAfter  string
 		stripPrefix bool
+		filterRules []string
 	)
 
 	cmd := &cobra.Command{
@@ -483,16 +539,24 @@ func listCommand() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		Short:   "list oss object",
 		Run: func(cmd *cobra.Command, args []string) {
+			filter, err := buildFilter(filterRules)
+			if err != nil {
+				fatalf("build filter: %v\n", err)
+			}
+
 			bucket, prefix, ok := splitBucketKey(args[0])
 			if !ok {
 				fatalf("invalid bucket:prefix\n")
 			}
-			err := listObjects(cmd.Context(), bucket, prefix, delimiter, startAfter, func(op *oss.ObjectProperties) error {
-				key := oss.ToString(op.Key)
-				if stripPrefix {
-					key = strings.TrimPrefix(key, prefix)
+			err = listObjects(cmd.Context(), bucket, prefix, delimiter, startAfter, func(op *oss.ObjectProperties) error {
+				objectKey := oss.ToString(op.Key)
+				if filter.isMatch(objectKey) {
+					return nil
 				}
-				fmt.Println(key)
+				if stripPrefix {
+					objectKey = strings.TrimPrefix(objectKey, prefix)
+				}
+				fmt.Println(objectKey)
 				return nil
 			})
 			if err != nil {
@@ -504,6 +568,8 @@ func listCommand() *cobra.Command {
 	cmd.Flags().StringVar(&delimiter, "delimiter", "", "delimiter")
 	cmd.Flags().StringVar(&startAfter, "start-after", "", "start after")
 	cmd.Flags().BoolVar(&stripPrefix, "strip-prefix", false, "strip key prefix")
+
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
 
 	return cmd
 }
@@ -611,6 +677,7 @@ func downloadCommand() *cobra.Command {
 	var (
 		outputPath  string
 		parallelNum int
+		filterRules []string
 	)
 	opts := &DownloadOptions{
 		Force:       false,
@@ -625,6 +692,11 @@ func downloadCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Short: "download oss object",
 		Run: func(cmd *cobra.Command, args []string) {
+			filter, err := buildFilter(filterRules)
+			if err != nil {
+				fatalf("build filter: %v\n", err)
+			}
+
 			bucket, key, ok := splitBucketKey(args[0])
 			if !ok {
 				fatalf("invalid bucket:key\n")
@@ -639,7 +711,7 @@ func downloadCommand() *cobra.Command {
 				if outputPath == "" {
 					outputPath = "."
 				}
-				err := downloadDir(cmd.Context(), downloader, opts, bucket, key, outputPath)
+				err := downloadDir(cmd.Context(), downloader, opts, bucket, key, outputPath, filter)
 				if err != nil {
 					fatalf("download directory: %v\n", err)
 				}
@@ -658,6 +730,8 @@ func downloadCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "output path")
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultDownloadParallel, "parallel for download task")
 
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "overwrite file")
 	cmd.Flags().BoolVar(&opts.UseTempFile, "use-temp-file", false, "use .temp file")
 	cmd.Flags().BoolVar(&opts.SkipExisted, "skip-existed", false, "skip existed file")
@@ -672,6 +746,7 @@ func uploadCommand() *cobra.Command {
 	var (
 		parallelNum int
 		recursive   bool
+		filterRules []string
 	)
 
 	opts := &UploadOptions{
@@ -688,6 +763,11 @@ func uploadCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		Short: "upload file/directory to oss",
 		Run: func(cmd *cobra.Command, args []string) {
+			filter, err := buildFilter(filterRules)
+			if err != nil {
+				fatalf("build filter: %v\n", err)
+			}
+
 			bucket, key, ok := splitBucketKey(args[0])
 			if !ok {
 				fatalf("invalid bucket:key\n")
@@ -704,7 +784,7 @@ func uploadCommand() *cobra.Command {
 
 			localPath = filepath.Clean(localPath)
 			if fi.IsDir() {
-				err := uploadDir(cmd.Context(), uploader, opts, bucket, key, localPath, recursive)
+				err := uploadDir(cmd.Context(), uploader, opts, bucket, key, localPath, recursive, filter)
 				if err != nil {
 					fatalf("upload directory: %v\n", err)
 				}
@@ -720,6 +800,8 @@ func uploadCommand() *cobra.Command {
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultUploadParallel, "parallel for upload task")
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "upload all files recursively")
 
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+
 	cmd.Flags().BoolVar(&opts.ForbidOverwrite, "forbid-overwrite", false, "forbid overwrite")
 	cmd.Flags().BoolVarP(&opts.IncludeHidden, "hidden", "H", false, "include hidden files")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "dry run")
@@ -733,6 +815,7 @@ func uploadCommand() *cobra.Command {
 func copyCommand() *cobra.Command {
 	var (
 		parallelNum int
+		filterRules []string
 	)
 
 	opts := &CopyOptions{
@@ -748,6 +831,11 @@ func copyCommand() *cobra.Command {
 		Args:    cobra.ExactArgs(2),
 		Short:   "copy oss object",
 		Run: func(cmd *cobra.Command, args []string) {
+			filter, err := buildFilter(filterRules)
+			if err != nil {
+				fatalf("build filter: %v\n", err)
+			}
+
 			srcBucket, srcKey, ok := splitBucketKey(args[0])
 			if !ok {
 				fatalf("invalid bucket:key\n")
@@ -762,7 +850,7 @@ func copyCommand() *cobra.Command {
 			})
 
 			if strings.HasSuffix(srcKey, "/") || opts.Recursive {
-				err := copyDir(cmd.Context(), copier, opts, srcBucket, srcKey, dstBucket, dstKey)
+				err := copyDir(cmd.Context(), copier, opts, srcBucket, srcKey, dstBucket, dstKey, filter)
 				if err != nil {
 					fatalf("copy directory: %v\n", err)
 				}
@@ -777,6 +865,8 @@ func copyCommand() *cobra.Command {
 
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultUploadParallel, "parallel for upload task")
 
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+
 	cmd.Flags().BoolVarP(&opts.Recursive, "recursive", "R", false, "copy object recursively")
 	cmd.Flags().BoolVar(&opts.ForbidOverwrite, "forbid-overwrite", false, "forbid overwrite")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "dry run")
@@ -787,8 +877,9 @@ func copyCommand() *cobra.Command {
 
 func removeCommand() *cobra.Command {
 	var (
-		recursive bool
-		dryRun    bool
+		recursive   bool
+		dryRun      bool
+		filterRules []string
 	)
 
 	cmd := &cobra.Command{
@@ -797,6 +888,11 @@ func removeCommand() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		Short:   "remove oss object",
 		Run: func(cmd *cobra.Command, args []string) {
+			filter, err := buildFilter(filterRules)
+			if err != nil {
+				fatalf("build filter: %v\n", err)
+			}
+
 			bucket, key, ok := splitBucketKey(args[0])
 			if !ok {
 				fatalf("invalid bucket:key\n")
@@ -810,7 +906,12 @@ func removeCommand() *cobra.Command {
 					delimiter = "/"
 				}
 				err := listObjects(cmd.Context(), bucket, key, delimiter, "", func(op *oss.ObjectProperties) error {
-					err := deleteObject(cmd.Context(), bucket, oss.ToString(op.Key), dryRun)
+					objectKey := oss.ToString(op.Key)
+					if filter.isMatch(objectKey) {
+						return nil
+					}
+
+					err := deleteObject(cmd.Context(), bucket, objectKey, dryRun)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "delete object: %v\n", err)
 					}
@@ -830,6 +931,8 @@ func removeCommand() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "delete object recursively")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "dry run")
+
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
 
 	return cmd
 }
