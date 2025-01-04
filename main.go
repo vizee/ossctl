@@ -291,7 +291,8 @@ func getFileMD5(fname string, generatePreMD5 bool) ([]byte, error) {
 }
 
 type FileComparer struct {
-	checkMD5 bool
+	checkMD5       bool
+	generatePreMD5 bool
 }
 
 func (c *FileComparer) compareFile(curFile string, diffFile string) (bool, error) {
@@ -301,7 +302,7 @@ func (c *FileComparer) compareFile(curFile string, diffFile string) (bool, error
 	}
 	var curMD5 []byte
 	if c.checkMD5 {
-		curMD5, err = getFileMD5(curFile, true)
+		curMD5, err = getFileMD5(curFile, c.generatePreMD5)
 		if err != nil {
 			return false, err
 		}
@@ -338,6 +339,7 @@ type UploadOptions struct {
 	DryRun          bool
 	DiffDir         string
 	DiffMD5         bool
+	GenerateMD5     bool
 }
 
 func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions, bucket string, key string, filePath string) error {
@@ -371,7 +373,8 @@ func uploadDir(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions,
 	var fc *FileComparer
 	if opts.DiffDir != "" {
 		fc = &FileComparer{
-			checkMD5: opts.DiffMD5,
+			checkMD5:       opts.DiffMD5,
+			generatePreMD5: opts.GenerateMD5,
 		}
 	}
 
@@ -808,6 +811,7 @@ func uploadCommand() *cobra.Command {
 	cmd.Flags().IntVar(&opts.Workers, "workers", 1, "workers for upload files")
 	cmd.Flags().StringVar(&opts.DiffDir, "diff-dir", "", "compare file changes before upload")
 	cmd.Flags().BoolVar(&opts.DiffMD5, "diff-md5", false, "compare file by MD5")
+	cmd.Flags().BoolVar(&opts.GenerateMD5, "generate-md5", false, "generate .md5 file")
 
 	return cmd
 }
