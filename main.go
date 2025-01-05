@@ -572,7 +572,7 @@ func listCommand() *cobra.Command {
 	cmd.Flags().StringVar(&startAfter, "start-after", "", "start after")
 	cmd.Flags().BoolVar(&stripPrefix, "strip-prefix", false, "strip key prefix")
 
-	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
 
 	return cmd
 }
@@ -733,7 +733,7 @@ func downloadCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "output path")
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultDownloadParallel, "parallel for download task")
 
-	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
 
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "overwrite file")
 	cmd.Flags().BoolVar(&opts.UseTempFile, "use-temp-file", false, "use .temp file")
@@ -803,7 +803,7 @@ func uploadCommand() *cobra.Command {
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultUploadParallel, "parallel for upload task")
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "upload all files recursively")
 
-	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
 
 	cmd.Flags().BoolVar(&opts.ForbidOverwrite, "forbid-overwrite", false, "forbid overwrite")
 	cmd.Flags().BoolVarP(&opts.IncludeHidden, "hidden", "H", false, "include hidden files")
@@ -869,7 +869,7 @@ func copyCommand() *cobra.Command {
 
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultUploadParallel, "parallel for upload task")
 
-	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
 
 	cmd.Flags().BoolVarP(&opts.Recursive, "recursive", "R", false, "copy object recursively")
 	cmd.Flags().BoolVar(&opts.ForbidOverwrite, "forbid-overwrite", false, "forbid overwrite")
@@ -936,7 +936,7 @@ func removeCommand() *cobra.Command {
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "delete object recursively")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "dry run")
 
-	cmd.Flags().StringArrayVarP(&filterRules, "filter", "f", nil, "filter")
+	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
 
 	return cmd
 }
