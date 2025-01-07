@@ -35,7 +35,9 @@ var ossClient = func() *oss.Client {
 	return oss.NewClient(cfg)
 }()
 
-var verbose bool
+var (
+	verbose bool
+)
 
 func vprintf(format string, args ...any) {
 	if verbose {
@@ -97,6 +99,44 @@ func buildFilter(rules []string) (*Filter, error) {
 	}, nil
 }
 
+var stats struct {
+	total int64
+	size  int64
+	start time.Time
+}
+
+func toHumanReadableSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+func addStatsFlag(cmd *cobra.Command, withSize bool) {
+	var showStats bool
+
+	cmd.PostRun = func(cmd *cobra.Command, args []string) {
+		if showStats {
+			elapsed := time.Since(stats.start).Truncate(time.Second)
+			var result strings.Builder
+			fmt.Fprintf(&result, "elapsed: %s, total: %d files", elapsed.String(), stats.total)
+			if withSize {
+				fmt.Fprintf(&result, ", size: %s", toHumanReadableSize(stats.size))
+			}
+			result.WriteByte('\n')
+			io.WriteString(os.Stderr, result.String())
+		}
+	}
+
+	cmd.Flags().BoolVar(&showStats, "stats", false, "show statistics")
+}
+
 func listObjects(ctx context.Context, bucket string, prefix string, delimiter string, startAfter string, f func(*oss.ObjectProperties) error) error {
 	var nextToken *string
 	for {
@@ -155,6 +195,7 @@ func downloadObject(ctx context.Context, downloader *oss.Downloader, opts *Downl
 		}
 	}
 	vprintf("download: %s:%s -> %s\n", bucket, key, outputPath)
+	stats.total++
 
 	if !opts.DryRun {
 		res, err := downloader.DownloadFile(ctx, &oss.GetObjectRequest{
@@ -166,6 +207,7 @@ func downloadObject(ctx context.Context, downloader *oss.Downloader, opts *Downl
 		}
 
 		vprintf("download result: %s written=%d", outputPath, res.Written)
+		stats.size += res.Written
 	}
 
 	return nil
@@ -179,8 +221,13 @@ func catObject(ctx context.Context, w io.Writer, bucket string, key string) erro
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(w, res.Body)
-	return err
+	nwr, err := io.Copy(w, res.Body)
+	if err != nil {
+		return err
+	}
+	stats.total++
+	stats.size += nwr
+	return nil
 }
 
 func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *DownloadOptions, bucket string, prefix string, outputRoot string, filter *Filter) error {
@@ -343,6 +390,11 @@ type UploadOptions struct {
 }
 
 func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions, bucket string, key string, filePath string) error {
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+
 	req := &oss.PutObjectRequest{
 		Bucket: oss.Ptr(bucket),
 		Key:    oss.Ptr(key),
@@ -352,6 +404,7 @@ func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptio
 	}
 
 	vprintf("upload: %s -> %s:%s\n", filePath, bucket, key)
+	stats.total++
 
 	if !opts.DryRun {
 		res, err := uploader.UploadFile(ctx, req, filePath)
@@ -360,6 +413,7 @@ func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptio
 		}
 
 		vprintf("upload result: %s etag=%s\n", filePath, oss.ToString(res.ETag))
+		stats.size += fi.Size()
 	}
 
 	return nil
@@ -450,6 +504,7 @@ type CopyOptions struct {
 
 func copyObject(ctx context.Context, copier *oss.Copier, opts *CopyOptions, srcBucket string, srcKey string, dstBucket string, dstKey string) error {
 	vprintf("copy: %s:%s -> %s:%s\n", srcBucket, srcKey, dstBucket, dstKey)
+	stats.total++
 
 	if !opts.DryRun {
 		req := &oss.CopyObjectRequest{
@@ -514,6 +569,7 @@ func copyDir(ctx context.Context, copier *oss.Copier, opts *CopyOptions, srcBuck
 
 func deleteObject(ctx context.Context, bucket string, key string, dryRun bool) error {
 	vprintf("delete: %s:%s\n", bucket, key)
+	stats.total++
 
 	if !dryRun {
 		_, err := ossClient.DeleteObject(ctx, &oss.DeleteObjectRequest{
@@ -560,6 +616,8 @@ func listCommand() *cobra.Command {
 					objectKey = strings.TrimPrefix(objectKey, prefix)
 				}
 				fmt.Println(objectKey)
+				stats.total++
+				stats.size += op.Size
 				return nil
 			})
 			if err != nil {
@@ -573,6 +631,7 @@ func listCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&stripPrefix, "strip-prefix", false, "strip key prefix")
 
 	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
+	addStatsFlag(cmd, true)
 
 	return cmd
 }
@@ -613,6 +672,7 @@ func catCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&output, "output", "o", "-", "output")
+	addStatsFlag(cmd, true)
 
 	return cmd
 }
@@ -734,6 +794,7 @@ func downloadCommand() *cobra.Command {
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultDownloadParallel, "parallel for download task")
 
 	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
+	addStatsFlag(cmd, true)
 
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "overwrite file")
 	cmd.Flags().BoolVar(&opts.UseTempFile, "use-temp-file", false, "use .temp file")
@@ -804,6 +865,7 @@ func uploadCommand() *cobra.Command {
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "upload all files recursively")
 
 	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
+	addStatsFlag(cmd, true)
 
 	cmd.Flags().BoolVar(&opts.ForbidOverwrite, "forbid-overwrite", false, "forbid overwrite")
 	cmd.Flags().BoolVarP(&opts.IncludeHidden, "hidden", "H", false, "include hidden files")
@@ -870,6 +932,7 @@ func copyCommand() *cobra.Command {
 	cmd.Flags().IntVar(&parallelNum, "parallel", oss.DefaultUploadParallel, "parallel for upload task")
 
 	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
+	addStatsFlag(cmd, false)
 
 	cmd.Flags().BoolVarP(&opts.Recursive, "recursive", "R", false, "copy object recursively")
 	cmd.Flags().BoolVar(&opts.ForbidOverwrite, "forbid-overwrite", false, "forbid overwrite")
@@ -937,6 +1000,7 @@ func removeCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "dry run")
 
 	cmd.Flags().StringArrayVarP(&filterRules, "filter", "F", nil, "filter")
+	addStatsFlag(cmd, false)
 
 	return cmd
 }
@@ -956,5 +1020,6 @@ func main() {
 	app.AddCommand(copyCommand())
 	app.AddCommand(removeCommand())
 
+	stats.start = time.Now()
 	_ = app.Execute()
 }
