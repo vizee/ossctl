@@ -123,7 +123,7 @@ func addStatsFlag(cmd *cobra.Command, withSize bool) {
 
 	cmd.PostRun = func(cmd *cobra.Command, args []string) {
 		if showStats {
-			elapsed := time.Since(stats.start).Truncate(time.Second)
+			elapsed := time.Since(stats.start).Round(time.Second)
 			var result strings.Builder
 			fmt.Fprintf(&result, "elapsed: %s, total: %d files", elapsed.String(), stats.total)
 			if withSize {
@@ -405,6 +405,7 @@ func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptio
 
 	vprintf("upload: %s -> %s:%s\n", filePath, bucket, key)
 	stats.total++
+	stats.size += fi.Size()
 
 	if !opts.DryRun {
 		res, err := uploader.UploadFile(ctx, req, filePath)
@@ -413,7 +414,6 @@ func uploadObject(ctx context.Context, uploader *oss.Uploader, opts *UploadOptio
 		}
 
 		vprintf("upload result: %s etag=%s\n", filePath, oss.ToString(res.ETag))
-		stats.size += fi.Size()
 	}
 
 	return nil
