@@ -256,7 +256,7 @@ func downloadDir(ctx context.Context, downloader *oss.Downloader, opts *Download
 			defer wg.Done()
 			for op := range ch {
 				objectKey := oss.ToString(op.Key)
-				if filter.isMatch(objectKey) {
+				if !filter.isMatch(objectKey) {
 					continue
 				}
 
@@ -441,7 +441,7 @@ func uploadDir(ctx context.Context, uploader *oss.Uploader, opts *UploadOptions,
 		go func() {
 			defer wg.Done()
 			for filePath := range ch {
-				if filter.isMatch(filePath) {
+				if !filter.isMatch(filePath) {
 					continue
 				}
 
@@ -543,7 +543,7 @@ func copyDir(ctx context.Context, copier *oss.Copier, opts *CopyOptions, srcBuck
 			defer wg.Done()
 			for op := range ch {
 				srcKey := oss.ToString(op.Key)
-				if filter.isMatch(srcKey) {
+				if !filter.isMatch(srcKey) {
 					continue
 				}
 
@@ -609,7 +609,7 @@ func listCommand() *cobra.Command {
 			}
 			err = listObjects(cmd.Context(), bucket, prefix, delimiter, startAfter, func(op *oss.ObjectProperties) error {
 				objectKey := oss.ToString(op.Key)
-				if filter.isMatch(objectKey) {
+				if !filter.isMatch(objectKey) {
 					return nil
 				}
 				if stripPrefix {
@@ -974,7 +974,7 @@ func removeCommand() *cobra.Command {
 				}
 				err := listObjects(cmd.Context(), bucket, key, delimiter, "", func(op *oss.ObjectProperties) error {
 					objectKey := oss.ToString(op.Key)
-					if filter.isMatch(objectKey) {
+					if !filter.isMatch(objectKey) {
 						return nil
 					}
 
