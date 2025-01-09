@@ -106,16 +106,19 @@ var stats struct {
 }
 
 func toHumanReadableSize(size int64) string {
-	const unit = 1024
+	const (
+		units = "KMGTP"
+		unit  = 1024
+	)
 	if size < unit {
 		return fmt.Sprintf("%d B", size)
 	}
 	div, exp := int64(unit), 0
-	for n := size / unit; n >= unit; n /= unit {
+	for n := size / unit; n >= unit && exp+1 < len(units); n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.2f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.2f %cB", float64(size)/float64(div), units[exp])
 }
 
 func addStatsFlag(cmd *cobra.Command, withSize bool) {
